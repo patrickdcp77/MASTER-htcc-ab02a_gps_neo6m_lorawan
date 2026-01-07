@@ -38,13 +38,14 @@
  *    - Envoi via LoRaWAN d'une trame de 12 octets
  *    - Mise en veille jusqu'au prochain cycle
  * 
- * FORMAT DE LA TRAME LORAWAN (12 octets) :
- * - appData[0-1]  : Tension batterie (uint16, MSB first) en mV
- * - appData[2]    : Partie entière de la latitude
- * - appData[3-5]  : Partie décimale de la latitude (6 chiffres)
- * - appData[6]    : Partie entière de la longitude
- * - appData[7-9]  : Partie décimale de la longitude (6 chiffres)
- * - appData[10-11]: Altitude en mètres (int16, MSB first, signé)
+ * FORMAT DE LA TRAME LORAWAN (14 octets) :
+ * - appData[0-1]   : Tension batterie (uint16, MSB first) en mV
+ * - appData[2]     : Partie entière de la latitude
+ * - appData[3-5]   : Partie décimale de la latitude (6 chiffres)
+ * - appData[6]     : Partie entière de la longitude
+ * - appData[7-9]   : Partie décimale de la longitude (6 chiffres)
+ * - appData[10-11] : Altitude en mètres (int16, MSB first, signé)
+ * - appData[12-13] : Température DHT22 en 0.1°C (int16, MSB first)
  * 
  * CONFIGURATION LORAWAN :
  * - Mode : OTAA (Over The Air Activation)
@@ -80,6 +81,10 @@
 
 #include <Wire.h>  
 #include "HT_SH1107Wire.h"
+// DHT22 temperature sensor
+#include <Adafruit_Sensor.h>
+#include <DHT.h>
+#include <DHT_U.h>
 
 //SH1107Wire  display(0x3c, 500000, SDA, SCL ,GEOMETRY_128_64,GPIO10); // addr, freq, sda, scl, resolution, rst
 SH1107Wire oledDisplay(0x3c, 500000, SDA, SCL, GEOMETRY_128_64, GPIO10);
@@ -89,6 +94,11 @@ static const uint32_t GPSBaud = 9600;
 
 // The TinyGPS++ object
 TinyGPSPlus gps;
+
+// DHT22 setup (adjust pin if needed)
+#define DHTPIN GPIO2
+#define DHTTYPE DHT22
+DHT dht(DHTPIN, DHTTYPE);
 
 /*
 #define RF_FREQUENCY                                868E6 // Hz
@@ -200,15 +210,32 @@ void prepareTxFrame(uint8_t port) {
   oledDisplay.screenRotate(ANGLE_0_DEGREE);
   oledDisplay.setFont(ArialMT_Plain_10);
   
-  // Ligne 1: Numéro module
-  oledDisplay.drawString(0, 0, "Module: lora-03");
+  // Ligne 1: Numéro module + Température DHT22
+  {
+    float t = dht.readTemperature(); // Celsius
+    char line1[32];
+    if (isnan(t)) {
+      // En cas d'erreur de lecture, afficher seulement le module
+      sprintf(line1, "Module: lora-03");
+      Serial.println("DHT22 read failed");
+    } else {
+      // Arrondir à une décimale et afficher sur la même ligne
+      sprintf(line1, "Module: lora-03  %.1fC", t);
+    }
+    oledDisplay.drawString(0, 0, line1);
+  }
   
   // Ligne 2: Tension
   char line2[20];
   sprintf(line2, "Bat: %d mV", batteryVoltage);
   oledDisplay.drawString(0, 13, line2);
   
-  appDataSize = 12; // taille de la trame avec altitude
+  // Lecture température DHT22 (pour payload)
+  float t = dht.readTemperature(); // Celsius
+  bool tempValid = !isnan(t);
+  int16_t tempTenths = tempValid ? (int16_t)round(t * 10.0f) : (int16_t)0x7FFF; // 0.1°C, 0x7FFF invalide
+
+  appDataSize = 14; // taille de la trame avec altitude + température
   appData[0] = (uint8_t)(batteryVoltage >> 8);
   appData[1] = (uint8_t)batteryVoltage;
 
@@ -251,6 +278,10 @@ void prepareTxFrame(uint8_t port) {
     int16_t altitude = (int16_t)gps.altitude.meters();
     appData[10] = (uint8_t)(altitude >> 8);
     appData[11] = (uint8_t)altitude;
+
+    // Température en 0.1°C à la fin de la trame
+    appData[12] = (uint8_t)(tempTenths >> 8);
+    appData[13] = (uint8_t)tempTenths;
   } else {
     // GPS non valide : on met des zéros ou une valeur spéciale
     oledDisplay.drawString(0, 26, "GPS: waiting...");
@@ -265,6 +296,9 @@ void prepareTxFrame(uint8_t port) {
     appData[9] = 0;
     appData[10] = 0;
     appData[11] = 0;
+    // Température en 0.1°C à la fin de la trame (valeur mesurée ou invalide)
+    appData[12] = (uint8_t)(tempTenths >> 8);
+    appData[13] = (uint8_t)tempTenths;
     Serial.println("GPS location not valid, tension envoyée seule.");
   }
   
@@ -357,6 +391,9 @@ void setup() {
   delay(100);
   oledDisplay.clear();
   oledDisplay.setContrast(255);
+  
+  // Initialize DHT22
+  dht.begin();
   
   // Afficher le numéro du module LoRa pendant 5 secondes
   oledDisplay.setTextAlignment(TEXT_ALIGN_CENTER);
